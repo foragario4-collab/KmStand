@@ -1,0 +1,39 @@
+KM-STAND – SO WIRD DARAUS EINE APK
+==================================
+
+WEG A: OHNE INSTALLATION (über GitHub, ca. 10 Minuten)
+------------------------------------------------------
+1. Kostenloses Konto auf github.com anlegen.
+2. Oben rechts "+" > "New repository". Name: kmstand. "Private" wählen.
+   "Create repository" klicken.
+3. Auf "uploading an existing file" klicken.
+4. Den INHALT des Ordners "KmStand" (alle Dateien und Ordner, auch ".github")
+   in das Feld ziehen. Unten "Commit changes" klicken.
+5. Oben auf den Reiter "Actions" klicken. Dort läuft "APK bauen" (ca. 3–5 Minuten).
+   Falls nichts läuft: links "APK bauen" anklicken > "Run workflow".
+6. Bei grünem Haken: den Lauf anklicken, ganz unten bei "Artifacts"
+   "Km-Stand-APK" herunterladen. ZIP entpacken – darin liegt "app-release.apk".
+7. APK aufs Handy schicken, antippen, "Unbekannte Quellen erlauben", installieren.
+
+WEG B: MIT ANDROID STUDIO (am Computer)
+---------------------------------------
+1. Android Studio kostenlos installieren: developer.android.com/studio
+2. "Open" > Ordner "KmStand" auswählen. Warten, bis unten "Gradle sync" fertig ist
+   (beim ersten Mal einige Minuten, alles lädt automatisch).
+3. Menü "Build" > "Build App Bundle(s) / APK(s)" > "Build APK(s)".
+4. Rechts unten "locate" klicken – dort liegt die APK. Aufs Handy und installieren.
+
+NACH DER INSTALLATION
+---------------------
+- Beim ersten Öffnen: Standort, körperliche Aktivität und Benachrichtigungen erlauben.
+- In der Karte "Einrichtung" alles erlauben, was dort steht
+  (Standort "Immer zulassen", "Akku-Optimierung aus").
+- Samsung: Einstellungen > Akku > Hintergrundnutzungslimits > Km-Stand darf NICHT
+  unter "Inaktive Apps" oder "Tief inaktive Apps" stehen.
+- Xiaomi: App-Info > Akku-Sparmodus > "Keine Einschränkungen", "Autostart" an.
+
+WICHTIG
+-------
+Die Datei app/kmstand.keystore NICHT löschen. Sie ist der Schlüssel deiner App.
+Nur damit lassen sich spätere Updates über die alte Version installieren,
+ohne dass deine gespeicherten Kilometer verloren gehen.
