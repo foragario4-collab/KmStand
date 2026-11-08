@@ -14,6 +14,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -21,29 +22,47 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
- * Misst die Fahrt direkt über den GPS-Chip des Handys (ohne Google-Dienste) –
- * auch im Hintergrund und bei ausgeschaltetem Bildschirm.
+ * Misst die Fahrt direkt über den GPS-Chip (ohne Google-Dienste) – auch im Hintergrund.
+ * Steuerbar über App und Benachrichtigung: Start, Pause, Fortsetzen, Beenden.
  */
 class TrackingService : Service() {
 
     companion object {
         const val ACTION_START = "at.kmstand.app.START"
         const val ACTION_STOP = "at.kmstand.app.STOP"
+        const val ACTION_PAUSE = "at.kmstand.app.PAUSE"
+        const val ACTION_RESUME = "at.kmstand.app.RESUME"
 
-        fun start(c: Context) {
+        private fun startFg(c: Context, action: String?) {
             if (!Perms.hasFine(c)) {
                 Live.error = "„Genauer Standort“ ist nicht erlaubt."
                 Live.changed()
                 return
             }
             try {
-                ContextCompat.startForegroundService(
-                    c, Intent(c, TrackingService::class.java).setAction(ACTION_START)
-                )
+                val i = Intent(c, TrackingService::class.java)
+                if (action != null) i.action = action
+                ContextCompat.startForegroundService(c, i)
             } catch (e: Exception) {
                 Live.error = "Aufzeichnung konnte nicht starten (${e.javaClass.simpleName})."
                 Live.changed()
                 Notifs.showStartReminder(c, Store.isActive(c))
+            }
+        }
+
+        /** Neue Fahrt starten (oder pausierte fortsetzen). */
+        fun start(c: Context) = startFg(c, ACTION_START)
+
+        fun resume(c: Context) = startFg(c, ACTION_RESUME)
+
+        /** Sicherstellen, dass eine laufende Fahrt auch gemessen wird – ändert nichts am Zustand. */
+        fun ensure(c: Context) = startFg(c, null)
+
+        fun pause(c: Context) {
+            try {
+                c.startService(Intent(c, TrackingService::class.java).setAction(ACTION_PAUSE))
+            } catch (e: Exception) {
+                Store.pauseTrip(c)
             }
         }
 
@@ -52,6 +71,7 @@ class TrackingService : Service() {
                 c.startService(Intent(c, TrackingService::class.java).setAction(ACTION_STOP))
             } catch (e: Exception) {
                 Store.endTrip(c)
+                Notifs.showIdle(c)
             }
         }
     }
@@ -61,7 +81,6 @@ class TrackingService : Service() {
     private var listening = false
     private var last: Location? = null
     private var lastNotif = 0L
-
     private var lastGpsAt = 0L
 
     private val gpsListener = object : LocationListener {
@@ -75,10 +94,7 @@ class TrackingService : Service() {
         override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
     }
 
-    /**
-     * Absicherung (ab Android 12): kombinierter Standort des Systems.
-     * Wird nur benutzt, wenn der GPS-Chip seit 5 Sekunden nichts geliefert hat.
-     */
+    /** Absicherung (ab Android 12): nur benutzt, wenn der GPS-Chip 5 Sekunden nichts liefert. */
     private val fusedListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
             if (SystemClock.elapsedRealtime() - lastGpsAt > 5000) onLocation(location, false)
@@ -89,7 +105,7 @@ class TrackingService : Service() {
         override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
     }
 
-    /** WLAN/Mobilfunk-Standort: nur zur Anzeige, wird NICHT zu den Kilometern gezählt. */
+    /** WLAN/Mobilfunk-Standort: nur zur Anzeige, zählt NICHT zu den Kilometern. */
     private val netListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
             if (!Live.netFix) { Live.netFix = true; Live.changed() }
@@ -110,7 +126,6 @@ class TrackingService : Service() {
         }
     }
 
-    /** Erkennt, wenn das GPS-Signal abreißt (z. B. Tunnel, Garage). */
     private val watchdog = object : Runnable {
         override fun run() {
             if (!listening) return
@@ -119,6 +134,14 @@ class TrackingService : Service() {
                 Live.changed()
             }
             main.postDelayed(this, 5000)
+        }
+    }
+
+    /** Aktualisiert den Timer in der Benachrichtigung jede Sekunde (bei Bildschirm aus nur selten). */
+    private val notifTick = object : Runnable {
+        override fun run() {
+            refreshNotification()
+            main.postDelayed(this, 1000)
         }
     }
 
@@ -131,17 +154,24 @@ class TrackingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
+        val action = intent?.action
+
+        if (action == ACTION_STOP) {
             Store.endTrip(this)
             Notifs.cancel(this, Notifs.ID_STOP)
             shutdown()
+            Notifs.showIdle(this)
             return START_NOT_STICKY
         }
 
-        if (!Store.isActive(this)) {
-            if (intent?.action == ACTION_START) Store.startTrip(this)
-            else { stopSelf(); return START_NOT_STICKY }   // System-Neustart ohne laufende Fahrt
+        when (action) {
+            ACTION_START, ACTION_RESUME ->
+                if (Store.isActive(this)) Store.resumeTrip(this) else Store.startTrip(this)
+            ACTION_PAUSE ->
+                if (Store.isActive(this)) Store.pauseTrip(this)
         }
+
+        if (!Store.isActive(this)) { stopSelf(); return START_NOT_STICKY }
 
         val err = goForeground()
         if (err != null) {
@@ -152,12 +182,18 @@ class TrackingService : Service() {
             return START_NOT_STICKY
         }
         Notifs.cancel(this, Notifs.ID_START)
-        startLocation()
+        Notifs.cancel(this, Notifs.ID_IDLE)
+
+        if (Store.isPaused(this)) stopLocation() else startLocation()
+
+        main.removeCallbacks(notifTick)
+        lastNotif = 0L
+        main.post(notifTick)
         return START_STICKY
     }
 
     private fun goForeground(): String? = try {
-        val n = Notifs.tracking(this, Store.activeMeters(this))
+        val n = Notifs.tracking(this)
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(Notifs.ID_TRACK, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
         } else {
@@ -179,7 +215,7 @@ class TrackingService : Service() {
         Live.reset()
         Live.startedAt = SystemClock.elapsedRealtime()
         Live.gpsOff = !lm.isProviderEnabled(LocationManager.GPS_PROVIDER)
-        last = null
+        last = null          // nach Pause: Strecke während der Pause wird nicht gezählt
         lastGpsAt = 0L
         try {
             lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, gpsListener, Looper.getMainLooper())
@@ -210,6 +246,7 @@ class TrackingService : Service() {
     }
 
     private fun onLocation(l: Location, fromGps: Boolean) {
+        if (Store.isPaused(this)) return
         Live.hasFix = true
         Live.viaGps = fromGps
         Live.lastFixAt = SystemClock.elapsedRealtime()
@@ -219,7 +256,6 @@ class TrackingService : Service() {
         Live.acc = acc.roundToInt()
         if (l.hasSpeed()) Live.speed = (l.speed * 3.6f).roundToInt()
 
-        // Ungenaue Punkte nicht zählen
         if (acc > 35) { Live.weak = true; Live.changed(); return }
         Live.weak = false
 
@@ -233,7 +269,7 @@ class TrackingService : Service() {
         // GPS-Sprung (über 250 km/h): Punkt verwerfen
         if (v > 70) { last = l; Live.changed(); return }
 
-        // Stillstand (z. B. am Taxistand): GPS-Zittern nicht als Kilometer zählen
+        // Stillstand: GPS-Zittern nicht als Kilometer zählen
         val standing = l.hasSpeed() && l.speed < 1.0f && d < 25
         val prevAcc = if (prev.hasAccuracy()) prev.accuracy.toDouble() else acc
         if (standing || d < max(6.0, (acc + prevAcc) / 3.0)) {
@@ -246,18 +282,18 @@ class TrackingService : Service() {
         last = l
         if (!l.hasSpeed()) Live.speed = (v * 3.6).roundToInt()
         Live.changed()
-        updateNotification()
     }
 
     @SuppressLint("MissingPermission")
-    private fun updateNotification() {
-        val now = System.currentTimeMillis()
-        if (now - lastNotif < 5000) return
+    private fun refreshNotification() {
+        if (!Store.isActive(this)) return
+        val interactive = getSystemService(PowerManager::class.java)?.isInteractive ?: true
+        val now = SystemClock.elapsedRealtime()
+        if (!interactive && now - lastNotif < 30_000) return
         lastNotif = now
         try {
-            NotificationManagerCompat.from(this)
-                .notify(Notifs.ID_TRACK, Notifs.tracking(this, Store.activeMeters(this)))
-        } catch (_: SecurityException) { }
+            NotificationManagerCompat.from(this).notify(Notifs.ID_TRACK, Notifs.tracking(this))
+        } catch (_: Exception) { }
     }
 
     private fun stopLocation() {
@@ -268,6 +304,7 @@ class TrackingService : Service() {
         try { lm.removeUpdates(netListener) } catch (_: Exception) { }
         try { lm.unregisterGnssStatusCallback(gnss) } catch (_: Exception) { }
         listening = false
+        last = null
         main.removeCallbacks(watchdog)
         Live.running = false
         Live.hasFix = false
@@ -276,12 +313,14 @@ class TrackingService : Service() {
     }
 
     private fun shutdown() {
+        main.removeCallbacks(notifTick)
         stopLocation()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     override fun onDestroy() {
+        main.removeCallbacks(notifTick)
         stopLocation()
         super.onDestroy()
     }

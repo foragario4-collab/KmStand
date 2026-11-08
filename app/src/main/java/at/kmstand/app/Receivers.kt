@@ -35,6 +35,6 @@ class BootReceiver : BroadcastReceiver() {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         Notifs.createChannels(c)
         Transitions.register(c)
-        if (Store.isActive(c)) Notifs.showStartReminder(c, true)
+        if (Store.isActive(c)) Notifs.showStartReminder(c, true) else Notifs.showIdle(c)
     }
 }

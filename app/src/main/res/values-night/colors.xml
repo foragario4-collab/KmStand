@@ -1,15 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg">#0D131C</color>
-    <color name="surface">#151D29</color>
-    <color name="ink">#EEF1F5</color>
-    <color name="muted">#98A2B3</color>
-    <color name="faint">#667085</color>
-    <color name="line">#232E3D</color>
-    <color name="accent">#6E8EF5</color>
-    <color name="on_accent">#0D131C</color>
-    <color name="go">#2FB47F</color>
-    <color name="go_soft">#12291F</color>
-    <color name="stop">#E5604F</color>
-    <color name="warn">#E0A23A</color>
+    <color name="bg">#000000</color>
+    <color name="surface">#1C1C1E</color>
+    <color name="surface2">#2C2C2E</color>
+    <color name="ink">#F5F5F7</color>
+    <color name="muted">#98989F</color>
+    <color name="faint">#8E8E93</color>
+    <color name="line">#2C2C2E</color>
+    <color name="accent">#0068D9</color>
+    <color name="on_accent">#FFFFFF</color>
+    <color name="link">#4DA3FF</color>
+    <color name="go">#30D158</color>
+    <color name="go_soft">#12301B</color>
+    <color name="warn">#FFD60A</color>
+    <color name="warn_soft">#332B05</color>
+    <color name="stop">#D70015</color>
+    <color name="danger">#FF6961</color>
+    <color name="idle_soft">#2C2C2E</color>
+    <color name="notif_glass">#3A3A3C</color>
 </resources>

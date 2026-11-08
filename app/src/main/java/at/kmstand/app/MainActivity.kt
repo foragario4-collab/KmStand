@@ -17,6 +17,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,9 +25,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
-import java.util.Locale
 import kotlin.math.floor
-import kotlin.math.max
 
 class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceChangeListener {
 
@@ -35,8 +34,12 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
     private lateinit var tvSince: TextView
     private lateinit var tvTrip: TextView
     private lateinit var tvSpeed: TextView
-    private lateinit var tvDuration: TextView
-    private lateinit var btnGo: TextView
+    private lateinit var tvDays: TextView
+    private lateinit var tvClock: TextView
+    private lateinit var btnMain: View
+    private lateinit var btnMainIcon: ImageView
+    private lateinit var btnMainText: TextView
+    private lateinit var btnStop: View
     private lateinit var tvStatus: TextView
     private lateinit var chip: View
     private lateinit var chipDot: View
@@ -52,7 +55,7 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
 
     private val liveListener: () -> Unit = { renderLive() }
 
-    /** Jede Sekunde: Dauer und Status aktualisieren. */
+    /** Jede Sekunde: Timer und Status aktualisieren. */
     private val ticker = object : Runnable {
         override fun run() {
             renderDuration()
@@ -82,8 +85,12 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         tvSince = findViewById(R.id.since)
         tvTrip = findViewById(R.id.tripKm)
         tvSpeed = findViewById(R.id.speed)
-        tvDuration = findViewById(R.id.duration)
-        btnGo = findViewById(R.id.btnGo)
+        tvDays = findViewById(R.id.tvDays)
+        tvClock = findViewById(R.id.tvClock)
+        btnMain = findViewById(R.id.btnMain)
+        btnMainIcon = findViewById(R.id.btnMainIcon)
+        btnMainText = findViewById(R.id.btnMainText)
+        btnStop = findViewById(R.id.btnStop)
         tvStatus = findViewById(R.id.status)
         chip = findViewById(R.id.chip)
         chipDot = findViewById(R.id.chipDot)
@@ -96,9 +103,12 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         Notifs.createChannels(this)
 
         findViewById<TextView>(R.id.appVersion).text = "v" + appVersion()
-
         findViewById<View>(R.id.btnEdit).setOnClickListener { showEdit(false) }
-        btnGo.setOnClickListener { onGo() }
+
+        btnMain.clipToOutline = true
+        btnStop.clipToOutline = true
+        btnMain.setOnClickListener { onMain() }
+        btnStop.setOnClickListener { onStopTrip() }
 
         swAuto.isChecked = Store.autoStart(this)
         swAuto.setOnCheckedChangeListener { _, checked ->
@@ -117,8 +127,7 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         Store.tripPrefs(this).registerOnSharedPreferenceChangeListener(this)
         Live.listen(liveListener)
         Transitions.register(this)
-        // Fahrt läuft laut Speicher, aber die Messung nicht (z. B. nach Absturz/Neustart) → neu starten
-        if (Store.isActive(this) && !Live.running) TrackingService.start(this)
+        if (Store.isActive(this)) TrackingService.ensure(this) else Notifs.showIdle(this)
         renderAll()
         handler.removeCallbacks(ticker)
         handler.post(ticker)
@@ -149,17 +158,23 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         basePerms.launch(list.toTypedArray())
     }
 
-    private fun onGo() {
-        if (Store.isActive(this)) {
-            val m = Store.activeMeters(this)
-            TrackingService.stop(this)
-            Live.error = null
-            note = "Fahrt gespeichert: ${Fmt.dist(m)}"
-            renderAll()
-            return
+    /** Linker Knopf: Starten / Pause / Fortsetzen – je nach Zustand. */
+    private fun onMain() {
+        when {
+            !Store.isActive(this) -> if (!Store.hasOdo(this)) showEdit(true) else startTrip()
+            Store.isPaused(this) -> { note = null; TrackingService.resume(this) }
+            else -> TrackingService.pause(this)
         }
-        if (!Store.hasOdo(this)) { showEdit(true); return }
-        startTrip()
+    }
+
+    private fun onStopTrip() {
+        if (!Store.isActive(this)) return
+        val m = Store.activeMeters(this)
+        val dur = Store.elapsedMs(this)
+        TrackingService.stop(this)
+        Live.error = null
+        note = "Fahrt gespeichert: ${Fmt.dist(m)} in ${Fmt.duration(dur)}"
+        renderAll()
     }
 
     private fun startTrip() {
@@ -229,6 +244,8 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
 
     // ---------- Anzeige ----------
 
+    private fun color(res: Int) = ContextCompat.getColor(this, res)
+
     private fun renderAll() {
         renderMain()
         renderLive()
@@ -236,7 +253,6 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         renderTrips()
     }
 
-    /** Km-Stand, Fahrt-Kilometer, Button, Status-Badge, Einrichtung. */
     private fun renderMain() {
         val odo = Store.odoM(this)
         val tenths = floor(odo / 100.0).toLong()
@@ -245,38 +261,58 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         tvSince.text = if (Store.hasOdo(this)) "Eingestellt am ${Fmt.date(Store.setAt(this))}" else "Noch nicht eingestellt"
 
         val active = Store.isActive(this)
+        val paused = Store.isPaused(this)
         tvTrip.text = Fmt.km2(if (active) Store.activeMeters(this) else 0.0)
 
-        btnGo.text = if (active) "Fahrt beenden" else "Fahrt starten"
-        btnGo.setBackgroundResource(if (active) R.drawable.bg_btn_stop else R.drawable.bg_btn_start)
-        btnGo.setCompoundDrawablesRelativeWithIntrinsicBounds(
-            if (active) R.drawable.ic_stop else R.drawable.ic_play, 0, 0, 0
-        )
+        when {
+            !active -> mainButton(R.drawable.bg_btn_start, R.drawable.ic_play, "Fahrt starten", color(R.color.on_accent))
+            paused -> mainButton(R.drawable.bg_btn_start, R.drawable.ic_play, "Fortsetzen", color(R.color.on_accent))
+            else -> mainButton(R.drawable.bg_btn_glass, R.drawable.ic_pause, "Pause", color(R.color.ink))
+        }
+        btnStop.visibility = if (active) View.VISIBLE else View.GONE
 
-        chip.setBackgroundResource(if (active) R.drawable.bg_chip_live else R.drawable.bg_chip)
-        chipDot.setBackgroundResource(if (active) R.drawable.dot_live else R.drawable.dot_idle)
-        chipText.text = if (active) "Aufzeichnung" else "Bereit"
-        chipText.setTextColor(ContextCompat.getColor(this, if (active) R.color.go else R.color.muted))
+        when {
+            !active -> chip(R.drawable.bg_chip, R.drawable.dot_idle, "Bereit", R.color.muted)
+            paused -> chip(R.drawable.bg_chip_pause, R.drawable.dot_pause, "Pausiert", R.color.warn)
+            else -> chip(R.drawable.bg_chip_live, R.drawable.dot_live, "Aufzeichnung", R.color.go)
+        }
 
         swAuto.isEnabled = Perms.hasPlayServices(this)
         renderSetup()
     }
 
+    private fun mainButton(bg: Int, icon: Int, text: String, textColor: Int) {
+        btnMain.setBackgroundResource(bg)
+        btnMainIcon.setImageResource(icon)
+        btnMainText.text = text
+        btnMainText.setTextColor(textColor)
+        btnMain.contentDescription = text
+    }
+
+    private fun chip(bg: Int, dot: Int, text: String, textColor: Int) {
+        chip.setBackgroundResource(bg)
+        chipDot.setBackgroundResource(dot)
+        chipText.text = text
+        chipText.setTextColor(color(textColor))
+    }
+
     /** Status-Zeile und Tempo – zeigt genau, woran es gerade hängt. */
     private fun renderLive() {
         val active = Store.isActive(this)
-        tvSpeed.text = if (active && Live.running) Live.speed.toString() else "0"
+        val paused = Store.isPaused(this)
+        tvSpeed.text = if (active && !paused && Live.running) Live.speed.toString() else "0"
 
-        var color = R.color.muted
+        var c = R.color.muted
         val text: String = when {
             !active -> note ?: if (!Store.hasOdo(this)) "Gib zuerst deinen aktuellen Kilometerstand ein." else ""
-            Live.error != null -> { color = R.color.stop; Live.error ?: "" }
+            paused -> "Pausiert – es werden keine Kilometer gezählt."
+            Live.error != null -> { c = R.color.danger; Live.error ?: "" }
             !Perms.locationOn(this) || Live.gpsOff -> {
-                color = R.color.stop; "Standort/GPS ist am Handy ausgeschaltet. Bitte einschalten."
+                c = R.color.danger; "Standort/GPS ist am Handy ausgeschaltet. Bitte einschalten."
             }
-            !Live.running -> { color = R.color.warn; "Aufzeichnung wird gestartet …" }
+            !Live.running -> { c = R.color.warn; "Aufzeichnung wird gestartet …" }
             !Live.hasFix -> {
-                color = R.color.warn
+                c = R.color.warn
                 val sats = if (Live.satsSeen == 0) "noch keine Satelliten" else "${Live.satsUsed} von ${Live.satsSeen} Satelliten"
                 val base = if (Live.netFix) "Standort gefunden, warte auf GPS ($sats)" else "Suche GPS-Signal … ($sats)"
                 val waited = SystemClock.elapsedRealtime() - Live.startedAt
@@ -284,21 +320,24 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
                     "$base\nIm Gebäude findet GPS oft kein Signal – im Auto oder draußen klappt es."
                 else base
             }
-            Live.weak -> { color = R.color.warn; "Schwaches GPS-Signal (±${Live.acc} m)" }
+            Live.weak -> { c = R.color.warn; "Schwaches GPS-Signal (±${Live.acc} m)" }
             !Live.viaGps -> "Standort aktiv (Netz/WLAN) · ±${Live.acc} m"
             else -> "GPS aktiv · ±${Live.acc} m · ${Live.satsUsed} Satelliten"
         }
         if (tvStatus.text.toString() != text) tvStatus.text = text
-        tvStatus.setTextColor(ContextCompat.getColor(this, color))
+        tvStatus.setTextColor(color(c))
     }
 
     private fun renderDuration() {
-        val s = if (Store.isActive(this)) max(0L, (System.currentTimeMillis() - Store.activeStart(this)) / 1000) else 0L
-        val h = s / 3600
-        val m = (s % 3600) / 60
-        val sec = s % 60
-        tvDuration.text = if (h > 0) String.format(Locale.ROOT, "%d:%02d:%02d", h, m, sec)
-        else String.format(Locale.ROOT, "%d:%02d", m, sec)
+        val ms = Store.elapsedMs(this)
+        val d = Fmt.days(ms)
+        if (d > 0) {
+            tvDays.visibility = View.VISIBLE
+            tvDays.text = Fmt.daysText(d)
+        } else {
+            tvDays.visibility = View.GONE
+        }
+        tvClock.text = Fmt.clock(ms)
     }
 
     private fun renderSetup() {
@@ -343,7 +382,7 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
             }
 
         if (!Perms.hasNotif(this))
-            item("Benachrichtigungen", "Für Erinnerungen und die Anzeige während der Fahrt.") {
+            item("Benachrichtigungen", "Für Timer und Knöpfe in der Benachrichtigung.") {
                 if (Build.VERSION.SDK_INT >= 33 && Store.wasAsked(this, "base") &&
                     !shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)) openAppSettings()
                 else requestBasePerms()
@@ -371,8 +410,9 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
             val v = LayoutInflater.from(this).inflate(R.layout.item_trip, tripList, false)
             val start = t.optLong("start")
             val end = t.optLong("end")
-            v.findViewById<TextView>(R.id.tripWhen).text = "${Fmt.day(start)}  ${Fmt.time(start)}–${Fmt.time(end)}"
-            v.findViewById<TextView>(R.id.meta).text = "${Fmt.km1(t.optDouble("fromM"))} → ${Fmt.km1(t.optDouble("toM"))} km"
+            val dur = t.optLong("dur", -1L).let { if (it < 0) end - start else it }
+            v.findViewById<TextView>(R.id.tripWhen).text = "${Fmt.day(start)} · ${Fmt.time(start)}–${Fmt.time(end)}"
+            v.findViewById<TextView>(R.id.meta).text = "Dauer ${Fmt.duration(dur)}"
             v.findViewById<TextView>(R.id.dist).text = Fmt.dist(t.optDouble("meters"))
             if (i == n - 1) v.findViewById<View>(R.id.divider).visibility = View.GONE
             tripList.addView(v)
