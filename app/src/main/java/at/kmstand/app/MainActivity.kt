@@ -49,12 +49,13 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
     private lateinit var setupCard: View
     private lateinit var setupList: LinearLayout
     private lateinit var swDetect: SwitchCompat
-    private lateinit var swAuto: SwitchCompat
     private lateinit var tripList: LinearLayout
     private lateinit var updText: TextView
     private lateinit var updAction: TextView
     private lateinit var pendCard: View
     private lateinit var pendText: TextView
+    private lateinit var pendTitle: TextView
+    private lateinit var pendYes: TextView
 
     private val handler = Handler(Looper.getMainLooper())
     private var note: String? = null
@@ -110,12 +111,13 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         setupCard = findViewById(R.id.setupCard)
         setupList = findViewById(R.id.setupList)
         swDetect = findViewById(R.id.swDetect)
-        swAuto = findViewById(R.id.swAuto)
         tripList = findViewById(R.id.tripList)
         updText = findViewById(R.id.updText)
         updAction = findViewById(R.id.updAction)
         pendCard = findViewById(R.id.pendCard)
         pendText = findViewById(R.id.pendText)
+        pendTitle = findViewById(R.id.pendTitle)
+        pendYes = findViewById(R.id.pendYes)
 
         Notifs.createChannels(this)
 
@@ -127,13 +129,14 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         btnMain.setOnClickListener { onMain() }
         btnStop.setOnClickListener { onStopTrip() }
 
-        findViewById<View>(R.id.pendYes).setOnClickListener {
+        pendYes.setOnClickListener {
             val m = Store.pendMeters(this)
             note = "${Fmt.dist(m)} zum Km-Stand dazugezählt."
             TrackingService.confirm(this)
         }
         findViewById<View>(R.id.pendNo).setOnClickListener {
-            note = "Fahrt wird nicht gezählt."
+            note = if (Store.isPendingInPause(this)) "Bleibt pausiert – diese Strecke wird nicht gezählt."
+                   else "Fahrt wird nicht gezählt."
             TrackingService.reject(this)
         }
 
@@ -143,11 +146,6 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
             note = if (checked && !Perms.hasBackground(this))
                 "Tipp: Standort „Immer zulassen“, damit die Erkennung auch bei geschlossener App läuft." else null
             TrackingService.ensure(this)
-            renderAll()
-        }
-        swAuto.isChecked = Store.autoStart(this)
-        swAuto.setOnCheckedChangeListener { _, checked ->
-            Store.setAutoStart(this, checked)
             renderAll()
         }
 
@@ -358,6 +356,7 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         tvTrip.text = Fmt.km2(if (active) Store.activeMeters(this) else 0.0)
 
         when {
+            pending && active -> mainButton(R.drawable.bg_btn_start, R.drawable.ic_play, "Fortsetzen", color(R.color.on_accent))
             pending -> mainButton(R.drawable.bg_btn_start, R.drawable.ic_play, "Fahrt starten", color(R.color.on_accent))
             !active -> mainButton(R.drawable.bg_btn_start, R.drawable.ic_play, "Fahrt starten", color(R.color.on_accent))
             paused -> mainButton(R.drawable.bg_btn_start, R.drawable.ic_play, "Fortsetzen", color(R.color.on_accent))
@@ -372,7 +371,6 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
             else -> chip(R.drawable.bg_chip_live, R.drawable.dot_live, "Aufzeichnung", R.color.go)
         }
 
-        swAuto.isEnabled = Store.detectOn(this)
         renderSetup()
     }
 
@@ -400,10 +398,18 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         pendCard.visibility = View.VISIBLE
         val m = Store.pendMeters(this)
         val start = Store.pendStart(this)
-        pendText.text = if (Store.pendEnded(this))
-            "${Fmt.time(start)}–${Fmt.time(Store.pendEnd(this))} · ${Fmt.dist(m)}\nSoll diese Fahrt zum Km-Stand dazugezählt werden?"
+        val inPause = Store.isPendingInPause(this)
+        pendTitle.text = if (inPause) "Fahrt erkannt – Pause beenden?" else "Fahrt erkannt – mitzählen?"
+        pendYes.text = if (inPause) "Ja, fortsetzen" else "Ja, zählen"
+        val span = if (Store.pendEnded(this))
+            "${Fmt.time(start)}–${Fmt.time(Store.pendEnd(this))} · ${Fmt.dist(m)}"
         else
-            "Seit ${Fmt.time(start)} · ${Fmt.dist(m)} · ${Fmt.duration(Store.pendElapsedMs(this))}\nZählt im Hintergrund mit. Bei „Nein“ wird nichts gezählt."
+            "Seit ${Fmt.time(start)} · ${Fmt.dist(m)} · ${Fmt.duration(Store.pendElapsedMs(this))}"
+        pendText.text = when {
+            inPause -> "$span\nDeine Fahrt ist pausiert. Bei „Ja“ läuft sie weiter und die km kommen dazu, bei „Nein“ bleibt sie pausiert."
+            Store.pendEnded(this) -> "$span\nSoll diese Fahrt zum Km-Stand dazugezählt werden?"
+            else -> "$span\nZählt im Hintergrund mit. Bei „Nein“ wird nichts gezählt."
+        }
     }
 
     /** Status-Zeile und Tempo – zeigt genau, woran es gerade hängt. */
@@ -414,6 +420,7 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
 
         var c = R.color.muted
         val text: String = when {
+            Store.isPending(this) -> { c = R.color.warn; "Fahrt erkannt – bitte oben bestätigen." }
             !active -> when {
                 Store.isPending(this) -> { c = R.color.warn; "Fahrt erkannt – bitte oben bestätigen." }
                 else -> note ?: when {
@@ -423,7 +430,9 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
                     else -> ""
                 }
             }
-            paused -> "Pausiert – es werden keine Kilometer gezählt."
+            paused -> if (Store.isIgnoring(this)) "Pausiert – diese Strecke wird nicht gezählt."
+                      else if (Store.detectOn(this)) "Pausiert – fährst du los, fragt die App, ob die Fahrt weiterlaufen soll."
+                      else "Pausiert – es werden keine Kilometer gezählt."
             Live.error != null -> { c = R.color.danger; Live.error ?: "" }
             !Perms.locationOn(this) || Live.gpsOff -> {
                 c = R.color.danger; "Standort/GPS ist am Handy ausgeschaltet. Bitte einschalten."

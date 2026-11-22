@@ -84,6 +84,7 @@
             android:visibility="gone">
 
             <TextView
+                android:id="@+id/pendTitle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Fahrt erkannt – mitzählen?"
@@ -490,7 +491,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="2dp"
-                        android:text="Zählt im Hintergrund mit, sobald du schneller als 12 km/h fährst, und fragt dann, ob die Fahrt zählen soll."
+                        android:text="Merkt automatisch, wenn du schneller als 12 km/h fährst, und fragt dich, ob die Fahrt zum Km-Stand zählen soll."
                         android:textColor="@color/muted"
                         android:textSize="13sp" />
                 </LinearLayout>
@@ -501,48 +502,6 @@
                     android:layout_height="wrap_content" />
             </LinearLayout>
 
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:layout_marginTop="14dp"
-                android:layout_marginBottom="14dp"
-                android:background="@color/line" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginEnd="12dp"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Ohne Nachfrage zählen"
-                        android:textColor="@color/ink"
-                        android:textSize="15sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
-                        android:text="Erkannte Fahrten sofort zum Km-Stand dazuzählen, ohne zu fragen."
-                        android:textColor="@color/muted"
-                        android:textSize="13sp" />
-                </LinearLayout>
-
-                <androidx.appcompat.widget.SwitchCompat
-                    android:id="@+id/swAuto"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content" />
-            </LinearLayout>
         </LinearLayout>
 
         <!-- App-Update -->

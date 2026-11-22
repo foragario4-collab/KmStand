@@ -38,7 +38,11 @@ object Store {
     }
 
     // ---------- Erkannte Fahrt (noch nicht bestätigt) ----------
-    fun isPending(c: Context) = !isActive(c) && prefs(c).getLong("pendStart", 0L) > 0L
+    /** Erkannte Fahrt wartet auf Ja/Nein – ohne Fahrt oder während einer pausierten Fahrt. */
+    fun isPending(c: Context) = prefs(c).getLong("pendStart", 0L) > 0L && (!isActive(c) || isPaused(c))
+
+    /** Erkannte Fahrt gehört zu einer pausierten Fahrt („Pause beenden?“). */
+    fun isPendingInPause(c: Context) = isPending(c) && isActive(c)
     fun pendStart(c: Context) = prefs(c).getLong("pendStart", 0L)
     fun pendMeters(c: Context) = dbl(c, "pendMeters")
     fun pendEnd(c: Context) = prefs(c).getLong("pendEnd", 0L)
@@ -55,8 +59,6 @@ object Store {
     fun setIgnoring(c: Context, v: Boolean) = prefs(c).edit().putBoolean("ignoring", v).apply()
 
     // ---------- Einstellungen ----------
-    fun autoStart(c: Context) = prefs(c).getBoolean("autoStart", false)
-    fun setAutoStart(c: Context, v: Boolean) = prefs(c).edit().putBoolean("autoStart", v).apply()
     fun detectOn(c: Context) = prefs(c).getBoolean("detectOn", true)
     fun setDetectOn(c: Context, v: Boolean) = prefs(c).edit().putBoolean("detectOn", v).apply()
 
@@ -102,10 +104,11 @@ object Store {
         if (!isPaused(c)) return
         val p = prefs(c)
         val add = max(0L, System.currentTimeMillis() - p.getLong("pausedAt", 0L))
-        p.edit()
+        val e = p.edit()
             .putLong("pausedTotal", p.getLong("pausedTotal", 0L) + add)
             .putLong("pausedAt", 0L)
-            .apply()
+            .putBoolean("ignoring", false)
+        clearPendingKeys(e).apply()
     }
 
     @Synchronized
@@ -120,7 +123,7 @@ object Store {
 
     @Synchronized
     fun startPending(c: Context, meters: Double) {
-        if (isActive(c) || isPending(c)) return
+        if ((isActive(c) && !isPaused(c)) || isPending(c)) return
         prefs(c).edit()
             .putLong("pendStart", System.currentTimeMillis())
             .putString("pendMeters", max(0.0, meters).toString())
@@ -153,7 +156,9 @@ object Store {
 
     /**
      * „Ja“: die erkannten km kommen zum Km-Stand dazu.
-     * Fährt man noch, läuft die Fahrt normal weiter; ist sie schon vorbei, wird sie gleich gespeichert.
+     *  - Ohne Fahrt: daraus wird eine Fahrt (läuft weiter oder wird gleich gespeichert, wenn sie vorbei ist).
+     *  - Während einer Pause: die Pause endet beim Losfahren, die km kommen zur Fahrt dazu.
+     *    Ist die erkannte Strecke schon vorbei, bleibt die Fahrt ab dort wieder pausiert.
      */
     @Synchronized
     fun confirmPending(c: Context) {
@@ -161,8 +166,23 @@ object Store {
         val m = pendMeters(c)
         val start = pendStart(c)
         val end = pendEnd(c)
+        val p = prefs(c)
+
+        if (isActive(c)) {
+            val pausedAt = p.getLong("pausedAt", start)
+            val pausedTotal = p.getLong("pausedTotal", 0L) + max(0L, start - pausedAt)
+            val e = p.edit()
+                .putString("odoM", (odoM(c) + m).toString())
+                .putString("activeMeters", (activeMeters(c) + m).toString())
+                .putLong("pausedTotal", pausedTotal)
+                .putLong("pausedAt", if (end > 0L) end else 0L)
+                .putBoolean("ignoring", false)
+            clearPendingKeys(e).commit()
+            return
+        }
+
         val from = odoM(c)
-        val e = prefs(c).edit()
+        val e = p.edit()
             .putString("odoM", (from + m).toString())
             .putLong("activeStart", start)
             .putString("activeFrom", from.toString())
@@ -189,7 +209,7 @@ object Store {
         if (!isActive(c)) return 0.0
         val meters = activeMeters(c)
         val end = endAt ?: System.currentTimeMillis()
-        val dur = if (endAt != null) max(0L, endAt - activeStart(c)) else elapsedMs(c)
+        val dur = if (endAt != null) max(0L, endAt - activeStart(c) - prefs(c).getLong("pausedTotal", 0L)) else elapsedMs(c)
         val trip = JSONObject()
             .put("start", activeStart(c))
             .put("end", end)
@@ -201,12 +221,13 @@ object Store {
         val arr = JSONArray().put(trip)
         for (i in 0 until min(old.length(), 999)) arr.put(old.get(i))
         tripPrefs(c).edit().putString("trips", arr.toString()).apply()
-        prefs(c).edit()
+        val e = prefs(c).edit()
             .putLong("activeStart", 0L)
             .putString("activeMeters", "0")
             .putLong("pausedAt", 0L)
             .putLong("pausedTotal", 0L)
-            .apply()
+            .putBoolean("ignoring", false)
+        clearPendingKeys(e).apply()
         return meters
     }
 

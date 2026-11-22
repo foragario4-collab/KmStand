@@ -27,6 +27,7 @@ import kotlin.math.roundToInt
  * Zustände:
  *  - Fahrt läuft      → zählt zum Km-Stand
  *  - Fahrt erkannt    → zählt „auf Vorrat“, bis du Ja oder Nein drückst
+ *                       (auch während einer pausierten Fahrt: „Pause beenden?“)
  *  - Erkennung        → wartet, bis du schneller als 12 km/h fährst
  *  - Nein gedrückt    → zählt nichts, bis das Auto ein paar Minuten steht
  */
@@ -195,8 +196,8 @@ class TrackingService : Service() {
                 Notifs.cancel(this, Notifs.ID_STOP)
             }
             ACTION_START, ACTION_RESUME -> when {
-                Store.isActive(this) -> Store.resumeTrip(this)
                 Store.isPending(this) -> Store.confirmPending(this)
+                Store.isActive(this) -> Store.resumeTrip(this)
                 else -> Store.startTrip(this)
             }
             ACTION_PAUSE -> Store.pauseTrip(this)
@@ -228,10 +229,12 @@ class TrackingService : Service() {
         Notifs.cancel(this, Notifs.ID_START)
         Notifs.cancel(this, Notifs.ID_IDLE)
 
+        val paused = active && Store.isPaused(this)
         when {
-            active && Store.isPaused(this) -> stopLocation()
-            active || (pending && !Store.pendEnded(this)) -> startLocation(TRACK_MS)
-            else -> startLocation(DETECT_MS)
+            pending && !Store.pendEnded(this) -> startLocation(TRACK_MS)    // erkannte Fahrt läuft
+            active && !paused -> startLocation(TRACK_MS)                    // Fahrt läuft
+            paused && !Store.detectOn(this) && !pending -> stopLocation()   // Pause ohne Erkennung
+            else -> startLocation(DETECT_MS)                                // warten aufs Losfahren
         }
 
         if (pending) Notifs.showAsk(this) else Notifs.cancel(this, Notifs.ID_ASK)
@@ -334,13 +337,11 @@ class TrackingService : Service() {
         if (speed < 70) Live.speed = (speed * 3.6).roundToInt()
 
         when {
-            Store.isActive(this) -> {
-                if (!Store.isPaused(this)) {
-                    val m = accept(l, prev, acc, d, dt)
-                    if (m > 0) Store.addDistance(this, m)
-                }
-            }
             Store.isPending(this) -> onPending(l, prev, acc, d, dt, speed, now)
+            Store.isActive(this) && !Store.isPaused(this) -> {
+                val m = accept(l, prev, acc, d, dt)
+                if (m > 0) Store.addDistance(this, m)
+            }
             Store.isIgnoring(this) -> {
                 last = l
                 if (speed < SLOW_SPEED) {
@@ -367,12 +368,7 @@ class TrackingService : Service() {
             val m = accept(l, prev, acc, d, dt)
             hits = 0
             slowSince = 0L
-            if (Store.autoStart(this)) {
-                Store.startTrip(this)
-                if (m > 0) Store.addDistance(this, m)
-            } else {
-                Store.startPending(this, m)
-            }
+            Store.startPending(this, m)   // immer nachfragen: Ja = zählen, Nein = nicht zählen
             last = l
             update()
         } else {

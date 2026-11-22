@@ -117,7 +117,11 @@ object Notifs {
     private fun odoPlain(c: Context) = "${Fmt.km1(Store.odoM(c))} km"
 
     /** Benachrichtigung des Messdienstes – je nach Zustand. */
-    fun foreground(c: Context): Notification = if (Store.isActive(c)) tracking(c) else idle(c, true)
+    fun foreground(c: Context): Notification = when {
+        Store.isPending(c) -> idle(c, true)          // „Fahrt erkannt“ – mit Ja / Nein
+        Store.isActive(c) -> tracking(c)
+        else -> idle(c, true)
+    }
 
     /** Während einer Fahrt: Km-Stand groß, darunter km, km/h und Zeit. */
     fun tracking(c: Context): Notification {
@@ -175,13 +179,16 @@ object Notifs {
         val sub: String
         if (pending) {
             val m = Store.pendMeters(c)
-            sub = "Fahrt erkannt · ${Fmt.dist(m)} – mitzählen?"
-            pill(c, big, "Fahrt erkannt", R.drawable.n_pill_pause, R.color.warn)
+            val inPause = Store.isPendingInPause(c)
+            val yes = if (inPause) "Ja, fortsetzen" else "Ja, zählen"
+            sub = if (inPause) "Pause · Fahrt erkannt · ${Fmt.dist(m)} – fortsetzen?"
+                  else "Fahrt erkannt · ${Fmt.dist(m)} – mitzählen?"
+            pill(c, big, if (inPause) "Pausiert · Fahrt erkannt" else "Fahrt erkannt", R.drawable.n_pill_pause, R.color.warn)
             stats(big, Fmt.km2(m), "Erkannt (km)", if (Store.pendEnded(c)) 0 else Live.speed,
                 Fmt.duration(Store.pendElapsedMs(c)))
-            button(big, R.id.n_b1, "Ja, zählen", R.drawable.n_btn_accent, Color.WHITE, confirmPI(c))
+            button(big, R.id.n_b1, yes, R.drawable.n_btn_accent, Color.WHITE, confirmPI(c))
             button(big, R.id.n_b2, "Nein", R.drawable.n_btn_glass, col(c, R.color.ink), rejectPI(c))
-            smallButton(small, R.drawable.n_circle_accent, R.drawable.ic_play, "Ja, zählen", confirmPI(c))
+            smallButton(small, R.drawable.n_circle_accent, R.drawable.ic_play, yes, confirmPI(c))
             small.setTextColor(R.id.n_sub, col(c, R.color.warn))
         } else {
             val last = Store.lastTripMeters(c)
@@ -232,13 +239,20 @@ object Notifs {
         if (!Store.isPending(c)) { cancel(c, ID_ASK); return }
         val m = Store.pendMeters(c)
         val start = Store.pendStart(c)
-        val text = if (Store.pendEnded(c))
-            "Fahrt ${Fmt.time(start)}–${Fmt.time(Store.pendEnd(c))} · ${Fmt.dist(m)}. Zum Km-Stand dazuzählen?"
-        else
-            "Seit ${Fmt.time(start)} · ${Fmt.dist(m)} · ${Fmt.duration(Store.pendElapsedMs(c))}. Zählt im Hintergrund mit."
+        val inPause = Store.isPendingInPause(c)
+        val text = when {
+            inPause && Store.pendEnded(c) ->
+                "Deine Fahrt ist pausiert. Erkannt: ${Fmt.time(start)}–${Fmt.time(Store.pendEnd(c))} · ${Fmt.dist(m)}. Zur Fahrt dazuzählen?"
+            inPause ->
+                "Deine Fahrt ist pausiert. Seit ${Fmt.time(start)} · ${Fmt.dist(m)} · ${Fmt.duration(Store.pendElapsedMs(c))}. Zählt im Hintergrund mit."
+            Store.pendEnded(c) ->
+                "Fahrt ${Fmt.time(start)}–${Fmt.time(Store.pendEnd(c))} · ${Fmt.dist(m)}. Zum Km-Stand dazuzählen?"
+            else ->
+                "Seit ${Fmt.time(start)} · ${Fmt.dist(m)} · ${Fmt.duration(Store.pendElapsedMs(c))}. Zählt im Hintergrund mit."
+        }
         val n = NotificationCompat.Builder(c, CH_ASK)
             .setSmallIcon(R.drawable.ic_stat)
-            .setContentTitle("Fahrt erkannt – mitzählen?")
+            .setContentTitle(if (inPause) "Fahrt erkannt – Pause beenden?" else "Fahrt erkannt – mitzählen?")
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -247,7 +261,7 @@ object Notifs {
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
             .setContentIntent(openApp(c))
-            .addAction(0, "Ja, zählen", confirmPI(c))
+            .addAction(0, if (inPause) "Ja, fortsetzen" else "Ja, zählen", confirmPI(c))
             .addAction(0, "Nein", rejectPI(c))
             .build()
         post(c, ID_ASK, n)

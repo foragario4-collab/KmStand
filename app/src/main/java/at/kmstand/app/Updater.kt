@@ -96,6 +96,9 @@ object Updater {
 
                 if (url.isEmpty() || build <= currentBuild()) {
                     set(State.UpToDate)
+                } else if (currentBuild() <= 0 && build <= Store.prefs(app).getInt("updInstalledTag", 0)) {
+                    // Ältere Version ohne eigene Nummer: dieses Release wurde schon installiert
+                    set(State.UpToDate)
                 } else {
                     val name = json.optString("name").ifBlank { tag }
                     set(State.Available(Release(build, name, url, size)))
@@ -155,6 +158,8 @@ object Updater {
     fun canInstall(c: Context): Boolean = c.packageManager.canRequestPackageInstalls()
 
     fun install(c: Context, file: File) {
+        val s = state
+        if (s is State.Ready) Store.prefs(c).edit().putInt("updInstalledTag", s.r.build).apply()
         val uri = FileProvider.getUriForFile(c, "${c.packageName}.updates", file)
         val i = Intent(Intent.ACTION_VIEW)
             .setDataAndType(uri, "application/vnd.android.package-archive")

@@ -15,8 +15,7 @@ class TransitionReceiver : BroadcastReceiver() {
             if (e.activityType != DetectedActivity.IN_VEHICLE) continue
             if (e.transitionType == ActivityTransition.ACTIVITY_TRANSITION_ENTER) {
                 if (Store.isActive(c)) continue
-                if (Store.autoStart(c) && Perms.hasBackground(c)) TrackingService.start(c)
-                else Notifs.showStartReminder(c, false)
+                Notifs.showStartReminder(c, false)
             } else {
                 if (Store.isActive(c)) Notifs.showStopReminder(c)
             }

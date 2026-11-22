@@ -3,9 +3,15 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// Kommt beim Bauen auf GitHub automatisch mit (Nummer des Builds und Name des Repositorys).
-val buildNumber = (project.findProperty("buildNumber") as String?)?.toIntOrNull() ?: 0
-val ghRepo = (project.findProperty("ghRepo") as String?) ?: ""
+// Nummer des Builds und Name des Repositorys.
+// GitHub setzt GITHUB_RUN_NUMBER und GITHUB_REPOSITORY beim Bauen immer automatisch –
+// so stimmt die Versionsnummer auch dann, wenn die Bau-Anleitung nichts mitgibt.
+val buildNumber = ((project.findProperty("buildNumber") as String?)?.toIntOrNull())
+    ?: System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
+    ?: 0
+val ghRepo = ((project.findProperty("ghRepo") as String?)?.takeIf { it.isNotBlank() })
+    ?: System.getenv("GITHUB_REPOSITORY")
+    ?: ""
 
 android {
     namespace = "at.kmstand.app"
@@ -17,7 +23,7 @@ android {
         targetSdk = 34
         // 100 + Build-Nummer: immer höher als alle bisherigen Versionen (1–6)
         versionCode = 100 + buildNumber
-        versionName = "1.7.$buildNumber"
+        versionName = "1.10.$buildNumber"
         buildConfigField("String", "GH_REPO", "\"$ghRepo\"")
     }
 
