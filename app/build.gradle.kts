@@ -3,6 +3,10 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Kommt beim Bauen auf GitHub automatisch mit (Nummer des Builds und Name des Repositorys).
+val buildNumber = (project.findProperty("buildNumber") as String?)?.toIntOrNull() ?: 0
+val ghRepo = (project.findProperty("ghRepo") as String?) ?: ""
+
 android {
     namespace = "at.kmstand.app"
     compileSdk = 34
@@ -11,9 +15,13 @@ android {
         applicationId = "at.kmstand.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "1.3"
+        // 100 + Build-Nummer: immer höher als alle bisherigen Versionen (1–6)
+        versionCode = 100 + buildNumber
+        versionName = "1.7.$buildNumber"
+        buildConfigField("String", "GH_REPO", "\"$ghRepo\"")
     }
+
+    buildFeatures { buildConfig = true }
 
     // Fester Schlüssel: Updates lassen sich immer über die alte Version installieren,
     // gespeicherte Kilometer bleiben erhalten.

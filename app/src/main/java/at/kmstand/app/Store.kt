@@ -14,14 +14,16 @@ object Store {
 
     private fun dbl(c: Context, k: String) = prefs(c).getString(k, null)?.toDoubleOrNull() ?: 0.0
 
+    // ---------- Km-Stand ----------
     fun odoM(c: Context) = dbl(c, "odoM")
     fun hasOdo(c: Context) = prefs(c).getBoolean("hasOdo", false)
     fun setAt(c: Context) = prefs(c).getLong("setAt", 0L)
+
+    // ---------- Laufende Fahrt ----------
     fun isActive(c: Context) = prefs(c).getLong("activeStart", 0L) > 0L
     fun activeStart(c: Context) = prefs(c).getLong("activeStart", 0L)
     fun activeMeters(c: Context) = dbl(c, "activeMeters")
     private fun activeFrom(c: Context) = dbl(c, "activeFrom")
-
     fun isPaused(c: Context) = isActive(c) && prefs(c).getLong("pausedAt", 0L) > 0L
 
     /** Reine Fahrzeit in Millisekunden – Pausen werden nicht mitgezählt. */
@@ -35,8 +37,28 @@ object Store {
         return max(0L, now - activeStart(c) - pausedTotal - running)
     }
 
+    // ---------- Erkannte Fahrt (noch nicht bestätigt) ----------
+    fun isPending(c: Context) = !isActive(c) && prefs(c).getLong("pendStart", 0L) > 0L
+    fun pendStart(c: Context) = prefs(c).getLong("pendStart", 0L)
+    fun pendMeters(c: Context) = dbl(c, "pendMeters")
+    fun pendEnd(c: Context) = prefs(c).getLong("pendEnd", 0L)
+    fun pendEnded(c: Context) = pendEnd(c) > 0L
+
+    fun pendElapsedMs(c: Context): Long {
+        if (!isPending(c)) return 0L
+        val end = if (pendEnded(c)) pendEnd(c) else System.currentTimeMillis()
+        return max(0L, end - pendStart(c))
+    }
+
+    /** Nach „Nein“: bis das Auto steht, nicht nochmal fragen. */
+    fun isIgnoring(c: Context) = prefs(c).getBoolean("ignoring", false)
+    fun setIgnoring(c: Context, v: Boolean) = prefs(c).edit().putBoolean("ignoring", v).apply()
+
+    // ---------- Einstellungen ----------
     fun autoStart(c: Context) = prefs(c).getBoolean("autoStart", false)
     fun setAutoStart(c: Context, v: Boolean) = prefs(c).edit().putBoolean("autoStart", v).apply()
+    fun detectOn(c: Context) = prefs(c).getBoolean("detectOn", true)
+    fun setDetectOn(c: Context, v: Boolean) = prefs(c).edit().putBoolean("detectOn", v).apply()
 
     fun wasAsked(c: Context, key: String) = prefs(c).getBoolean("asked_$key", false)
     fun markAsked(c: Context, key: String) = prefs(c).edit().putBoolean("asked_$key", true).apply()
@@ -51,16 +73,22 @@ object Store {
         e.apply()
     }
 
+    private fun clearPendingKeys(e: SharedPreferences.Editor) = e
+        .putLong("pendStart", 0L)
+        .putString("pendMeters", "0")
+        .putLong("pendEnd", 0L)
+
     @Synchronized
     fun startTrip(c: Context) {
         if (isActive(c)) return
-        prefs(c).edit()
+        val e = prefs(c).edit()
             .putLong("activeStart", System.currentTimeMillis())
             .putString("activeFrom", odoM(c).toString())
             .putString("activeMeters", "0")
             .putLong("pausedAt", 0L)
             .putLong("pausedTotal", 0L)
-            .apply()
+            .putBoolean("ignoring", false)
+        clearPendingKeys(e).apply()
     }
 
     @Synchronized
@@ -88,15 +116,84 @@ object Store {
             .apply()
     }
 
+    // ---------- Erkannte Fahrt ----------
+
+    @Synchronized
+    fun startPending(c: Context, meters: Double) {
+        if (isActive(c) || isPending(c)) return
+        prefs(c).edit()
+            .putLong("pendStart", System.currentTimeMillis())
+            .putString("pendMeters", max(0.0, meters).toString())
+            .putLong("pendEnd", 0L)
+            .putBoolean("ignoring", false)
+            .apply()
+    }
+
+    @Synchronized
+    fun addPending(c: Context, m: Double) {
+        if (!isPending(c)) return
+        prefs(c).edit().putString("pendMeters", (pendMeters(c) + m).toString()).apply()
+    }
+
+    /** Auto steht seit einer Weile: erkannte Fahrt endet dort, wo es langsam wurde. */
+    @Synchronized
+    fun endPending(c: Context, endAt: Long, meters: Double) {
+        if (!isPending(c)) return
+        prefs(c).edit()
+            .putLong("pendEnd", max(endAt, pendStart(c)))
+            .putString("pendMeters", max(0.0, meters).toString())
+            .apply()
+    }
+
+    @Synchronized
+    fun resumePending(c: Context) {
+        if (!isPending(c)) return
+        prefs(c).edit().putLong("pendEnd", 0L).apply()
+    }
+
+    /**
+     * „Ja“: die erkannten km kommen zum Km-Stand dazu.
+     * Fährt man noch, läuft die Fahrt normal weiter; ist sie schon vorbei, wird sie gleich gespeichert.
+     */
+    @Synchronized
+    fun confirmPending(c: Context) {
+        if (!isPending(c)) return
+        val m = pendMeters(c)
+        val start = pendStart(c)
+        val end = pendEnd(c)
+        val from = odoM(c)
+        val e = prefs(c).edit()
+            .putString("odoM", (from + m).toString())
+            .putLong("activeStart", start)
+            .putString("activeFrom", from.toString())
+            .putString("activeMeters", m.toString())
+            .putLong("pausedAt", 0L)
+            .putLong("pausedTotal", 0L)
+            .putBoolean("ignoring", false)
+        clearPendingKeys(e).commit()
+        if (end > 0L) endTrip(c, end)
+    }
+
+    /** „Nein“: nichts wird gezählt. Fährt man noch, fragt die App bei dieser Fahrt nicht nochmal. */
+    @Synchronized
+    fun rejectPending(c: Context) {
+        if (!isPending(c)) return
+        val stillMoving = !pendEnded(c)
+        val e = prefs(c).edit().putBoolean("ignoring", stillMoving)
+        clearPendingKeys(e).apply()
+    }
+
     /** Beendet die Fahrt und speichert sie immer – egal wie kurz. */
     @Synchronized
-    fun endTrip(c: Context): Double {
+    fun endTrip(c: Context, endAt: Long? = null): Double {
         if (!isActive(c)) return 0.0
         val meters = activeMeters(c)
+        val end = endAt ?: System.currentTimeMillis()
+        val dur = if (endAt != null) max(0L, endAt - activeStart(c)) else elapsedMs(c)
         val trip = JSONObject()
             .put("start", activeStart(c))
-            .put("end", System.currentTimeMillis())
-            .put("dur", elapsedMs(c))
+            .put("end", end)
+            .put("dur", dur)
             .put("fromM", activeFrom(c))
             .put("toM", odoM(c))
             .put("meters", meters)

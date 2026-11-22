@@ -19,4 +19,5 @@
     <color name="idle_soft">#E9E9EE</color>
     <color name="notif_glass">#E5E5EA</color>
     <color name="ic_bg">#0A6CFF</color>
+    <color name="notif_stat">#EFEFF4</color>
 </resources>

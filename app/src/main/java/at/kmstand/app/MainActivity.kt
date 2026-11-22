@@ -20,11 +20,13 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
+import java.util.Locale
 import kotlin.math.floor
 
 class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceChangeListener {
@@ -46,35 +48,45 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
     private lateinit var chipText: TextView
     private lateinit var setupCard: View
     private lateinit var setupList: LinearLayout
+    private lateinit var swDetect: SwitchCompat
     private lateinit var swAuto: SwitchCompat
     private lateinit var tripList: LinearLayout
+    private lateinit var updText: TextView
+    private lateinit var updAction: TextView
+    private lateinit var pendCard: View
+    private lateinit var pendText: TextView
 
     private val handler = Handler(Looper.getMainLooper())
     private var note: String? = null
     private var pendingStart = false
 
     private val liveListener: () -> Unit = { renderLive() }
+    private val updListener: () -> Unit = { renderUpdate() }
 
-    /** Jede Sekunde: Timer und Status aktualisieren. */
+    /** Jede Sekunde: Timer, Status und erkannte Fahrt aktualisieren. */
     private val ticker = object : Runnable {
         override fun run() {
             renderDuration()
             renderLive()
+            renderPending()
             handler.postDelayed(this, 1000)
         }
     }
 
     private val basePerms = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        Transitions.register(this)
         if (pendingStart) {
             pendingStart = false
             if (Perms.hasFine(this)) startTrip()
             else if (Perms.hasCoarse(this)) note = "Bitte „Genauer Standort“ erlauben – mit „Ungefähr“ kann die App keine Kilometer messen."
         }
+        TrackingService.ensure(this)
         renderAll()
     }
 
-    private val bgPerm = registerForActivityResult(ActivityResultContracts.RequestPermission()) { renderAll() }
+    private val bgPerm = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        TrackingService.ensure(this)
+        renderAll()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -97,8 +109,13 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         chipText = findViewById(R.id.chipText)
         setupCard = findViewById(R.id.setupCard)
         setupList = findViewById(R.id.setupList)
+        swDetect = findViewById(R.id.swDetect)
         swAuto = findViewById(R.id.swAuto)
         tripList = findViewById(R.id.tripList)
+        updText = findViewById(R.id.updText)
+        updAction = findViewById(R.id.updAction)
+        pendCard = findViewById(R.id.pendCard)
+        pendText = findViewById(R.id.pendText)
 
         Notifs.createChannels(this)
 
@@ -110,13 +127,31 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         btnMain.setOnClickListener { onMain() }
         btnStop.setOnClickListener { onStopTrip() }
 
+        findViewById<View>(R.id.pendYes).setOnClickListener {
+            val m = Store.pendMeters(this)
+            note = "${Fmt.dist(m)} zum Km-Stand dazugezählt."
+            TrackingService.confirm(this)
+        }
+        findViewById<View>(R.id.pendNo).setOnClickListener {
+            note = "Fahrt wird nicht gezählt."
+            TrackingService.reject(this)
+        }
+
+        swDetect.isChecked = Store.detectOn(this)
+        swDetect.setOnCheckedChangeListener { _, checked ->
+            Store.setDetectOn(this, checked)
+            note = if (checked && !Perms.hasBackground(this))
+                "Tipp: Standort „Immer zulassen“, damit die Erkennung auch bei geschlossener App läuft." else null
+            TrackingService.ensure(this)
+            renderAll()
+        }
         swAuto.isChecked = Store.autoStart(this)
         swAuto.setOnCheckedChangeListener { _, checked ->
             Store.setAutoStart(this, checked)
-            note = if (checked && !Perms.hasBackground(this))
-                "Für den Automatik-Modus brauchst du Standort „Immer zulassen“." else null
             renderAll()
         }
+
+        updAction.setOnClickListener { onUpdateAction() }
 
         if (!Perms.hasFine(this)) requestBasePerms()
     }
@@ -126,9 +161,11 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         Store.prefs(this).registerOnSharedPreferenceChangeListener(this)
         Store.tripPrefs(this).registerOnSharedPreferenceChangeListener(this)
         Live.listen(liveListener)
-        Transitions.register(this)
-        if (Store.isActive(this)) TrackingService.ensure(this) else Notifs.showIdle(this)
+        Updater.listen(updListener)
+        if (Perms.hasFine(this)) TrackingService.ensure(this) else Notifs.showIdle(this)
+        if (Updater.shouldAutoCheck(this)) Updater.check(this, true)
         renderAll()
+        renderUpdate()
         handler.removeCallbacks(ticker)
         handler.post(ticker)
     }
@@ -137,12 +174,13 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         Store.prefs(this).unregisterOnSharedPreferenceChangeListener(this)
         Store.tripPrefs(this).unregisterOnSharedPreferenceChangeListener(this)
         Live.unlisten(liveListener)
+        Updater.unlisten(updListener)
         handler.removeCallbacks(ticker)
         super.onPause()
     }
 
     override fun onSharedPreferenceChanged(p: SharedPreferences?, key: String?) {
-        if (key == "trips") renderTrips() else renderMain()
+        if (key == "trips") renderTrips() else { renderMain(); renderPending() }
     }
 
     // ---------- Aktionen ----------
@@ -152,7 +190,6 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION
         )
-        if (Build.VERSION.SDK_INT >= 29) list += Manifest.permission.ACTIVITY_RECOGNITION
         if (Build.VERSION.SDK_INT >= 33) list += Manifest.permission.POST_NOTIFICATIONS
         Store.markAsked(this, "base")
         basePerms.launch(list.toTypedArray())
@@ -161,6 +198,7 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
     /** Linker Knopf: Starten / Pause / Fortsetzen – je nach Zustand. */
     private fun onMain() {
         when {
+            Store.isPending(this) -> TrackingService.confirm(this)
             !Store.isActive(this) -> if (!Store.hasOdo(this)) showEdit(true) else startTrip()
             Store.isPaused(this) -> { note = null; TrackingService.resume(this) }
             else -> TrackingService.pause(this)
@@ -220,6 +258,59 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         input.requestFocus()
     }
 
+    // ---------- App-Update ----------
+
+    private fun onUpdateAction() {
+        when (val s = Updater.state) {
+            is Updater.State.Available -> Updater.download(this, s.r)
+            is Updater.State.Ready -> {
+                if (!s.file.exists()) { Updater.download(this, s.r); return }
+                if (!Updater.canInstall(this)) {
+                    Toast.makeText(this, "Erlaube „Apps installieren“ für Km-Stand und tippe dann nochmal auf Installieren.", Toast.LENGTH_LONG).show()
+                    try {
+                        startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+                    } catch (_: Exception) { openAppSettings() }
+                    return
+                }
+                try { Updater.install(this, s.file) } catch (e: Exception) {
+                    Toast.makeText(this, "Installation konnte nicht geöffnet werden.", Toast.LENGTH_LONG).show()
+                }
+            }
+            is Updater.State.Downloading, is Updater.State.Checking -> { }
+            else -> Updater.check(this, false)
+        }
+    }
+
+    private fun renderUpdate() {
+        val cur = "Installiert: v${appVersion()}"
+        when (val s = Updater.state) {
+            is Updater.State.Idle -> upd(cur, "Prüfen", false)
+            is Updater.State.Checking -> upd("Suche nach Updates …", null, false)
+            is Updater.State.UpToDate -> upd("$cur\nDu hast die neueste Version.", "Prüfen", false)
+            is Updater.State.Available -> {
+                val mb = if (s.r.size > 0) String.format(Locale.GERMANY, " · %.1f MB", s.r.size / 1_000_000.0) else ""
+                upd("Neu: ${s.r.name}$mb", "Laden", true)
+            }
+            is Updater.State.Downloading -> upd("Wird geladen … ${s.percent} %", null, false)
+            is Updater.State.Ready -> upd("${s.r.name} ist bereit.", "Installieren", true)
+            is Updater.State.Failed -> upd(s.msg, "Nochmal", false)
+        }
+    }
+
+    private fun upd(text: String, action: String?, primary: Boolean) {
+        updText.text = text
+        if (action == null) { updAction.visibility = View.GONE; return }
+        updAction.visibility = View.VISIBLE
+        updAction.text = action
+        if (primary) {
+            updAction.setBackgroundResource(R.drawable.bg_btn_start)
+            updAction.setTextColor(color(R.color.on_accent))
+        } else {
+            updAction.background = null
+            updAction.setTextColor(color(R.color.link))
+        }
+    }
+
     @Suppress("DEPRECATION")
     private fun appVersion(): String = try {
         packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
@@ -248,6 +339,7 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
 
     private fun renderAll() {
         renderMain()
+        renderPending()
         renderLive()
         renderDuration()
         renderTrips()
@@ -262,9 +354,11 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
 
         val active = Store.isActive(this)
         val paused = Store.isPaused(this)
+        val pending = Store.isPending(this)
         tvTrip.text = Fmt.km2(if (active) Store.activeMeters(this) else 0.0)
 
         when {
+            pending -> mainButton(R.drawable.bg_btn_start, R.drawable.ic_play, "Fahrt starten", color(R.color.on_accent))
             !active -> mainButton(R.drawable.bg_btn_start, R.drawable.ic_play, "Fahrt starten", color(R.color.on_accent))
             paused -> mainButton(R.drawable.bg_btn_start, R.drawable.ic_play, "Fortsetzen", color(R.color.on_accent))
             else -> mainButton(R.drawable.bg_btn_glass, R.drawable.ic_pause, "Pause", color(R.color.ink))
@@ -272,12 +366,13 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         btnStop.visibility = if (active) View.VISIBLE else View.GONE
 
         when {
+            pending -> chip(R.drawable.bg_chip_pause, R.drawable.dot_pause, "Fahrt erkannt", R.color.warn)
             !active -> chip(R.drawable.bg_chip, R.drawable.dot_idle, "Bereit", R.color.muted)
             paused -> chip(R.drawable.bg_chip_pause, R.drawable.dot_pause, "Pausiert", R.color.warn)
             else -> chip(R.drawable.bg_chip_live, R.drawable.dot_live, "Aufzeichnung", R.color.go)
         }
 
-        swAuto.isEnabled = Perms.hasPlayServices(this)
+        swAuto.isEnabled = Store.detectOn(this)
         renderSetup()
     }
 
@@ -296,6 +391,21 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
         chipText.setTextColor(color(textColor))
     }
 
+    /** Karte „Fahrt erkannt – mitzählen?“ mit Ja / Nein. */
+    private fun renderPending() {
+        if (!Store.isPending(this)) {
+            pendCard.visibility = View.GONE
+            return
+        }
+        pendCard.visibility = View.VISIBLE
+        val m = Store.pendMeters(this)
+        val start = Store.pendStart(this)
+        pendText.text = if (Store.pendEnded(this))
+            "${Fmt.time(start)}–${Fmt.time(Store.pendEnd(this))} · ${Fmt.dist(m)}\nSoll diese Fahrt zum Km-Stand dazugezählt werden?"
+        else
+            "Seit ${Fmt.time(start)} · ${Fmt.dist(m)} · ${Fmt.duration(Store.pendElapsedMs(this))}\nZählt im Hintergrund mit. Bei „Nein“ wird nichts gezählt."
+    }
+
     /** Status-Zeile und Tempo – zeigt genau, woran es gerade hängt. */
     private fun renderLive() {
         val active = Store.isActive(this)
@@ -304,7 +414,15 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
 
         var c = R.color.muted
         val text: String = when {
-            !active -> note ?: if (!Store.hasOdo(this)) "Gib zuerst deinen aktuellen Kilometerstand ein." else ""
+            !active -> when {
+                Store.isPending(this) -> { c = R.color.warn; "Fahrt erkannt – bitte oben bestätigen." }
+                else -> note ?: when {
+                    !Store.hasOdo(this) -> "Gib zuerst deinen aktuellen Kilometerstand ein."
+                    Store.isIgnoring(this) -> "Diese Fahrt wird nicht gezählt."
+                    Store.detectOn(this) && Live.running -> "Fahrterkennung aktiv – zählt mit, sobald du losfährst."
+                    else -> ""
+                }
+            }
             paused -> "Pausiert – es werden keine Kilometer gezählt."
             Live.error != null -> { c = R.color.danger; Live.error ?: "" }
             !Perms.locationOn(this) || Live.gpsOff -> {
@@ -367,22 +485,15 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
                     else requestBasePerms()
                 }
         } else if (!Perms.hasBackground(this)) {
-            item("Standort „Immer zulassen“", "Für Messung im Hintergrund und den Automatik-Modus.") {
+            item("Standort „Immer zulassen“", "Damit Messung und Fahrterkennung auch im Hintergrund laufen.") {
                 if (Build.VERSION.SDK_INT >= 29 && !Store.wasAsked(this, "bg")) {
                     Store.markAsked(this, "bg"); bgPerm.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
                 } else openAppSettings()
             }
         }
 
-        if (Perms.hasPlayServices(this) && !Perms.hasActivity(this))
-            item("Fahrterkennung", "Erkennt, wenn du losfährst, und erinnert dich.") {
-                if (Build.VERSION.SDK_INT >= 29 && Store.wasAsked(this, "base") &&
-                    !shouldShowRequestPermissionRationale(Manifest.permission.ACTIVITY_RECOGNITION)) openAppSettings()
-                else requestBasePerms()
-            }
-
         if (!Perms.hasNotif(this))
-            item("Benachrichtigungen", "Für Timer und Knöpfe in der Benachrichtigung.") {
+            item("Benachrichtigungen", "Für die Frage „Fahrt erkannt – mitzählen?“ und die Knöpfe.") {
                 if (Build.VERSION.SDK_INT >= 33 && Store.wasAsked(this, "base") &&
                     !shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)) openAppSettings()
                 else requestBasePerms()
@@ -390,9 +501,6 @@ class MainActivity : AppCompatActivity(), SharedPreferences.OnSharedPreferenceCh
 
         if (!Perms.ignoresBattery(this))
             item("Akku-Optimierung aus", "Damit Android die Messung nicht beendet.", "Ändern") { askBattery() }
-
-        if (!Perms.hasPlayServices(this))
-            item("Fahrterkennung nicht verfügbar", "Dein Handy hat keine Google-Dienste. Messen klappt trotzdem – starte die Fahrt dann selbst.")
 
         setupCard.visibility = if (setupList.childCount == 0) View.GONE else View.VISIBLE
     }

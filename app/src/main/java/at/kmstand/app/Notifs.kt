@@ -8,32 +8,43 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
+import android.text.style.RelativeSizeSpan
 import android.view.View
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import kotlin.math.floor
 
 object Notifs {
     const val CH_TRACK = "fahrt"
     const val CH_REMIND = "reminder"
+    const val CH_ASK = "erkannt"
     const val ID_TRACK = 1
     const val ID_START = 2
     const val ID_STOP = 3
     const val ID_IDLE = 4
+    const val ID_ASK = 5
 
     private const val FLAGS = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
 
     fun createChannels(c: Context) {
         val nm = c.getSystemService(NotificationManager::class.java) ?: return
-        try { nm.deleteNotificationChannel("tracking") } catch (_: Exception) { }   // Kanal aus Version 1.0–1.2
+        try { nm.deleteNotificationChannel("tracking") } catch (_: Exception) { }
         nm.createNotificationChannel(
             NotificationChannel(CH_TRACK, "Fahrt", NotificationManager.IMPORTANCE_DEFAULT).apply {
-                description = "Timer, Kilometer und Knöpfe für die laufende Fahrt"
+                description = "Km-Stand, Timer und Knöpfe"
                 setSound(null, null)
                 enableVibration(false)
                 setShowBadge(false)
             }
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CH_ASK, "Erkannte Fahrten", NotificationManager.IMPORTANCE_HIGH)
+                .apply { description = "Fragt, ob eine erkannte Fahrt zum Km-Stand zählen soll" }
         )
         nm.createNotificationChannel(
             NotificationChannel(CH_REMIND, "Erinnerungen", NotificationManager.IMPORTANCE_HIGH)
@@ -55,6 +66,8 @@ object Notifs {
     fun stopPI(c: Context) = svc(c, 2, TrackingService.ACTION_STOP, false)
     private fun pausePI(c: Context) = svc(c, 5, TrackingService.ACTION_PAUSE, false)
     private fun resumePI(c: Context) = svc(c, 6, TrackingService.ACTION_RESUME, true)
+    private fun confirmPI(c: Context) = svc(c, 7, TrackingService.ACTION_CONFIRM, true)
+    private fun rejectPI(c: Context) = svc(c, 8, TrackingService.ACTION_REJECT, false)
 
     private fun dismissPI(c: Context, id: Int) = PendingIntent.getBroadcast(
         c, 10 + id, Intent(c, ActionReceiver::class.java).putExtra("id", id), FLAGS
@@ -68,7 +81,7 @@ object Notifs {
         rv.setTextColor(R.id.n_pill, col(c, color))
     }
 
-    private fun button(c: Context, rv: RemoteViews, id: Int, text: String, bg: Int, textColor: Int, pi: PendingIntent) {
+    private fun button(rv: RemoteViews, id: Int, text: String, bg: Int, textColor: Int, pi: PendingIntent) {
         rv.setViewVisibility(id, View.VISIBLE)
         rv.setTextViewText(id, text)
         rv.setInt(id, "setBackgroundResource", bg)
@@ -76,59 +89,68 @@ object Notifs {
         rv.setOnClickPendingIntent(id, pi)
     }
 
-    private fun clock(rv: RemoteViews, ms: Long) {
-        val d = Fmt.days(ms)
-        if (d > 0) {
-            rv.setViewVisibility(R.id.n_days, View.VISIBLE)
-            rv.setTextViewText(R.id.n_days, Fmt.daysText(d))
-        } else {
-            rv.setViewVisibility(R.id.n_days, View.GONE)
-        }
-        rv.setTextViewText(R.id.n_clock, Fmt.clock(ms))
+    private fun smallButton(rv: RemoteViews, bg: Int, icon: Int, desc: String, pi: PendingIntent) {
+        rv.setInt(R.id.n_btn, "setBackgroundResource", bg)
+        rv.setImageViewResource(R.id.n_btn, icon)
+        rv.setContentDescription(R.id.n_btn, desc)
+        rv.setOnClickPendingIntent(R.id.n_btn, pi)
     }
 
-    /** Benachrichtigung während einer Fahrt (läuft oder pausiert). */
+    private fun stats(rv: RemoteViews, trip: String, tripLabel: String, speed: Int, time: String) {
+        rv.setTextViewText(R.id.n_trip, trip)
+        rv.setTextViewText(R.id.n_trip_label, tripLabel)
+        rv.setTextViewText(R.id.n_speed, speed.toString())
+        rv.setTextViewText(R.id.n_time, time)
+    }
+
+    /** Km-Stand groß, Nachkommastelle und „km“ kleiner und grau – z. B. 84.532,7 km */
+    private fun odoText(c: Context): CharSequence {
+        val tenths = floor(Store.odoM(c) / 100.0).toLong()
+        val main = Fmt.int.format(tenths / 10)
+        val tail = ",${tenths % 10} km"
+        val sp = SpannableString(main + tail)
+        sp.setSpan(RelativeSizeSpan(0.6f), main.length, sp.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        sp.setSpan(ForegroundColorSpan(col(c, R.color.muted)), main.length, sp.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        return sp
+    }
+
+    private fun odoPlain(c: Context) = "${Fmt.km1(Store.odoM(c))} km"
+
+    /** Benachrichtigung des Messdienstes – je nach Zustand. */
+    fun foreground(c: Context): Notification = if (Store.isActive(c)) tracking(c) else idle(c, true)
+
+    /** Während einer Fahrt: Km-Stand groß, darunter km, km/h und Zeit. */
     fun tracking(c: Context): Notification {
         val paused = Store.isPaused(c)
-        val ms = Store.elapsedMs(c)
+        val full = Fmt.duration(Store.elapsedMs(c))
         val km = Fmt.km2(Store.activeMeters(c))
-        val full = Fmt.duration(ms)
+        val speed = if (paused) 0 else Live.speed
 
         val small = RemoteViews(c.packageName, R.layout.notif_small)
         val big = RemoteViews(c.packageName, R.layout.notif_big)
-
-        small.setTextViewText(R.id.n_title, "$full · $km km")
-        clock(big, ms)
+        small.setTextViewText(R.id.n_title, odoText(c))
+        big.setTextViewText(R.id.n_odo, odoText(c))
+        stats(big, km, "Gefahren (km)", speed, full)
 
         if (paused) {
-            small.setTextViewText(R.id.n_sub, "Pausiert")
+            small.setTextViewText(R.id.n_sub, "Pausiert · $km km · $full")
             small.setTextColor(R.id.n_sub, col(c, R.color.warn))
-            small.setInt(R.id.n_btn, "setBackgroundResource", R.drawable.n_circle_accent)
-            small.setImageViewResource(R.id.n_btn, R.drawable.ic_play)
-            small.setContentDescription(R.id.n_btn, "Fortsetzen")
-            small.setOnClickPendingIntent(R.id.n_btn, resumePI(c))
-
+            smallButton(small, R.drawable.n_circle_accent, R.drawable.ic_play, "Fortsetzen", resumePI(c))
             pill(c, big, "Pausiert", R.drawable.n_pill_pause, R.color.warn)
-            big.setTextViewText(R.id.n_line, "$km km · pausiert")
-            button(c, big, R.id.n_b1, "Fortsetzen", R.drawable.n_btn_accent, Color.WHITE, resumePI(c))
+            button(big, R.id.n_b1, "Fortsetzen", R.drawable.n_btn_accent, Color.WHITE, resumePI(c))
         } else {
-            small.setTextViewText(R.id.n_sub, "Aufzeichnung · ${Live.speed} km/h")
+            small.setTextViewText(R.id.n_sub, "$km km · $speed km/h · $full")
             small.setTextColor(R.id.n_sub, col(c, R.color.muted))
-            small.setInt(R.id.n_btn, "setBackgroundResource", R.drawable.n_circle_glass)
-            small.setImageViewResource(R.id.n_btn, R.drawable.ic_pause)
-            small.setContentDescription(R.id.n_btn, "Pause")
-            small.setOnClickPendingIntent(R.id.n_btn, pausePI(c))
-
+            smallButton(small, R.drawable.n_circle_glass, R.drawable.ic_pause, "Pause", pausePI(c))
             pill(c, big, "Aufzeichnung", R.drawable.n_pill_go, R.color.go)
-            big.setTextViewText(R.id.n_line, "$km km · ${Live.speed} km/h")
-            button(c, big, R.id.n_b1, "Pause", R.drawable.n_btn_glass, col(c, R.color.ink), pausePI(c))
+            button(big, R.id.n_b1, "Pause", R.drawable.n_btn_glass, col(c, R.color.ink), pausePI(c))
         }
-        button(c, big, R.id.n_b2, "Beenden", R.drawable.n_btn_stop, Color.WHITE, stopPI(c))
+        button(big, R.id.n_b2, "Beenden", R.drawable.n_btn_stop, Color.WHITE, stopPI(c))
 
         return NotificationCompat.Builder(c, CH_TRACK)
             .setSmallIcon(R.drawable.ic_stat)
-            .setContentTitle(if (paused) "Fahrt pausiert" else "Fahrt läuft")
-            .setContentText("$full · $km km")
+            .setContentTitle(odoPlain(c))
+            .setContentText("$km km · $speed km/h · $full")
             .setStyle(NotificationCompat.DecoratedCustomViewStyle())
             .setCustomContentView(small)
             .setCustomBigContentView(big)
@@ -142,47 +164,93 @@ object Notifs {
             .build()
     }
 
-    @SuppressLint("MissingPermission")
-    private fun post(c: Context, id: Int, n: Notification) {
-        try { NotificationManagerCompat.from(c).notify(id, n) } catch (_: SecurityException) { }
-    }
-
-    /** Bereit-Benachrichtigung mit „Fahrt starten“ – erscheint, wenn keine Fahrt läuft. */
-    fun showIdle(c: Context) {
-        if (Store.isActive(c)) return
-        val last = Store.lastTripMeters(c)
-        val sub = if (last != null) "Letzte Fahrt gespeichert: ${Fmt.dist(last)}" else "Bereit für die nächste Fahrt"
-
+    /** Ohne laufende Fahrt: Bereit / Fahrterkennung aktiv / Fahrt erkannt. */
+    fun idle(c: Context, ongoing: Boolean): Notification {
+        val pending = Store.isPending(c)
         val small = RemoteViews(c.packageName, R.layout.notif_small)
-        small.setTextViewText(R.id.n_title, "Bereit · Tippe zum Starten")
-        small.setTextViewText(R.id.n_sub, sub)
-        small.setTextColor(R.id.n_sub, col(c, R.color.muted))
-        small.setInt(R.id.n_btn, "setBackgroundResource", R.drawable.n_circle_accent)
-        small.setImageViewResource(R.id.n_btn, R.drawable.ic_play)
-        small.setContentDescription(R.id.n_btn, "Fahrt starten")
-        small.setOnClickPendingIntent(R.id.n_btn, startPI(c))
-
         val big = RemoteViews(c.packageName, R.layout.notif_big)
-        pill(c, big, "Bereit", R.drawable.n_pill_idle, R.color.muted)
-        clock(big, 0L)
-        big.setTextViewText(R.id.n_line, sub)
-        button(c, big, R.id.n_b1, "Fahrt starten", R.drawable.n_btn_accent, Color.WHITE, startPI(c))
-        big.setViewVisibility(R.id.n_b2, View.GONE)
+        small.setTextViewText(R.id.n_title, odoText(c))
+        big.setTextViewText(R.id.n_odo, odoText(c))
 
-        val n = NotificationCompat.Builder(c, CH_TRACK)
+        val sub: String
+        if (pending) {
+            val m = Store.pendMeters(c)
+            sub = "Fahrt erkannt · ${Fmt.dist(m)} – mitzählen?"
+            pill(c, big, "Fahrt erkannt", R.drawable.n_pill_pause, R.color.warn)
+            stats(big, Fmt.km2(m), "Erkannt (km)", if (Store.pendEnded(c)) 0 else Live.speed,
+                Fmt.duration(Store.pendElapsedMs(c)))
+            button(big, R.id.n_b1, "Ja, zählen", R.drawable.n_btn_accent, Color.WHITE, confirmPI(c))
+            button(big, R.id.n_b2, "Nein", R.drawable.n_btn_glass, col(c, R.color.ink), rejectPI(c))
+            smallButton(small, R.drawable.n_circle_accent, R.drawable.ic_play, "Ja, zählen", confirmPI(c))
+            small.setTextColor(R.id.n_sub, col(c, R.color.warn))
+        } else {
+            val last = Store.lastTripMeters(c)
+            val detecting = ongoing && Store.detectOn(c)
+            sub = if (detecting) "Fahrterkennung aktiv · Tippe zum Starten" else "Bereit · Tippe zum Starten"
+            if (detecting) pill(c, big, "Fahrterkennung aktiv", R.drawable.n_pill_go, R.color.go)
+            else pill(c, big, "Bereit", R.drawable.n_pill_idle, R.color.muted)
+            stats(big, if (last != null) Fmt.km2(last) else "–", "Letzte Fahrt (km)", 0, Fmt.duration(0L))
+            button(big, R.id.n_b1, "Fahrt starten", R.drawable.n_btn_accent, Color.WHITE, startPI(c))
+            big.setViewVisibility(R.id.n_b2, View.GONE)
+            smallButton(small, R.drawable.n_circle_accent, R.drawable.ic_play, "Fahrt starten", startPI(c))
+            small.setTextColor(R.id.n_sub, col(c, R.color.muted))
+        }
+        small.setTextViewText(R.id.n_sub, sub)
+
+        val b = NotificationCompat.Builder(c, CH_TRACK)
             .setSmallIcon(R.drawable.ic_stat)
-            .setContentTitle("Km-Stand bereit")
+            .setContentTitle(odoPlain(c))
             .setContentText(sub)
             .setStyle(NotificationCompat.DecoratedCustomViewStyle())
             .setCustomContentView(small)
             .setCustomBigContentView(big)
-            .setOngoing(false)
+            .setOngoing(ongoing)
             .setOnlyAlertOnce(true)
             .setSilent(true)
             .setShowWhen(false)
             .setContentIntent(openApp(c))
+        if (ongoing) {
+            b.setCategory(NotificationCompat.CATEGORY_SERVICE)
+            b.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+        }
+        return b.build()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun post(c: Context, id: Int, n: Notification) {
+        try { NotificationManagerCompat.from(c).notify(id, n) } catch (_: Exception) { }
+    }
+
+    /** „Bereit“-Benachrichtigung, wenn der Messdienst nicht läuft. */
+    fun showIdle(c: Context) {
+        if (Store.isActive(c)) return
+        post(c, ID_IDLE, idle(c, false))
+    }
+
+    /** Pop-up: „Fahrt erkannt – mitzählen?“ mit Ja / Nein. Meldet sich nur beim ersten Mal mit Ton. */
+    fun showAsk(c: Context) {
+        if (!Store.isPending(c)) { cancel(c, ID_ASK); return }
+        val m = Store.pendMeters(c)
+        val start = Store.pendStart(c)
+        val text = if (Store.pendEnded(c))
+            "Fahrt ${Fmt.time(start)}–${Fmt.time(Store.pendEnd(c))} · ${Fmt.dist(m)}. Zum Km-Stand dazuzählen?"
+        else
+            "Seit ${Fmt.time(start)} · ${Fmt.dist(m)} · ${Fmt.duration(Store.pendElapsedMs(c))}. Zählt im Hintergrund mit."
+        val n = NotificationCompat.Builder(c, CH_ASK)
+            .setSmallIcon(R.drawable.ic_stat)
+            .setContentTitle("Fahrt erkannt – mitzählen?")
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
+            .setContentIntent(openApp(c))
+            .addAction(0, "Ja, zählen", confirmPI(c))
+            .addAction(0, "Nein", rejectPI(c))
             .build()
-        post(c, ID_IDLE, n)
+        post(c, ID_ASK, n)
     }
 
     fun showStartReminder(c: Context, resume: Boolean) {

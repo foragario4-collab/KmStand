@@ -18,4 +18,5 @@
     <color name="danger">#FF6961</color>
     <color name="idle_soft">#2C2C2E</color>
     <color name="notif_glass">#3A3A3C</color>
+    <color name="notif_stat">#2C2C2E</color>
 </resources>
